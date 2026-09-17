@@ -23,6 +23,7 @@ jobs:
 
       - name: Install Playwright
         run: |
+          pip install requests
           pip install playwright
           playwright install --with-deps chromium
 
