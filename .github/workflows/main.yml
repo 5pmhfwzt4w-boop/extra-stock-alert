@@ -27,7 +27,7 @@ jobs:
           pip install playwright
           playwright install --with-deps chromium
 
-      - name: Check product
+      - name: Check products
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -37,12 +37,16 @@ jobs:
           import requests
           from playwright.sync_api import sync_playwright
 
-          URL = "https://www.extra.com/en-sa/mobiles-tablets/mobiles/smartphone/apple-iphone-18-pro-max-5g-6-9-inch-512gb-burgundy/p/100528819"
+          EXTRA_URL = "https://www.extra.com/en-sa/mobiles-tablets/mobiles/smartphone/apple-iphone-18-pro-max-5g-6-9-inch-512gb-burgundy/p/100528819"
+
+          JARIR_URL = "https://www.jarir.com/dp/apple-iphone-18-pro-max-smartphones-689717.html"
 
           TOKEN = os.environ["TELEGRAM_TOKEN"]
           CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-          STATE_FILE = "stock_state.txt"
+          EXTRA_STATE_FILE = "extra_stock_state.txt"
+          JARIR_STATE_FILE = "jarir_stock_state.txt"
+
 
           def send_telegram(message):
               api = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -59,16 +63,23 @@ jobs:
 
               response.raise_for_status()
 
-          with sync_playwright() as p:
-              browser = p.chromium.launch(headless=True)
 
-              page = browser.new_page(
-                  viewport={"width": 1280, "height": 900},
-                  locale="en-SA"
-              )
+          def get_previous_state(filename):
+              if os.path.exists(filename):
+                  return open(filename).read().strip()
+
+              return "unknown"
+
+
+          def save_state(filename, state):
+              open(filename, "w").write(state)
+
+
+          def check_extra(page):
+              print("Checking eXtra...")
 
               page.goto(
-                  URL,
+                  EXTRA_URL,
                   wait_until="domcontentloaded",
                   timeout=60000
               )
@@ -87,39 +98,267 @@ jobs:
                   name="add to cart"
               )
 
-              buy_button_visible = buy_button.count() > 0
+              buy_button_visible = False
 
-              available = available = available_phrase or buy_button_visible
+              if buy_button.count() > 0:
+                  try:
+                      buy_button_visible = (
+                          buy_button.first.is_visible()
+                          and buy_button.first.is_enabled()
+                      )
+                  except Exception:
+                      buy_button_visible = False
+
+              available = available_phrase or buy_button_visible
+
+              print("eXtra available:", available)
+
+              return available
+
+
+          def check_jarir(page):
+              print("Checking Jarir...")
+
+              page.goto(
+                  JARIR_URL,
+                  wait_until="domcontentloaded",
+                  timeout=60000
+              )
+
+              page.wait_for_timeout(10000)
+
+              text = page.locator("body").inner_text().lower()
+
+              # علامات واضحة على نفاد المنتج في جرير
+              out_of_stock_phrases = [
+                  "نفدت الكمية",
+                  "نفد المخزون",
+                  "غير متوفر",
+                  "غير متاح"
+              ]
+
+              out_of_stock = any(
+                  phrase in text
+                  for phrase in out_of_stock_phrases
+              )
+
+              # زر التنبيه الظاهر في صورة المنتج غير المتوفر
+              notify_phrases = [
+                  "أبلغني عند توفر المنتج",
+                  "نبّهني عندما يكون متاحًا",
+                  "نبهني عند توفر المنتج",
+                  "notify me"
+              ]
+
+              notify_button_found = False
+
+              for phrase in notify_phrases:
+                  try:
+                      locator = page.get_by_text(
+                          phrase,
+                          exact=False
+                      )
+
+                      if locator.count() > 0:
+                          for i in range(locator.count()):
+                              try:
+                                  if locator.nth(i).is_visible():
+                                      notify_button_found = True
+                                      break
+                              except Exception:
+                                  pass
+
+                      if notify_button_found:
+                          break
+
+                  except Exception:
+                      pass
+
+              # البحث عن أزرار الشراء/الإضافة للسلة
+              purchase_button_phrases = [
+                  "أضف إلى السلة",
+                  "أضف للسلة",
+                  "إضافة إلى السلة",
+                  "إضافة للسلة",
+                  "أضف إلى عربة التسوق",
+                  "اشتر الآن",
+                  "شراء",
+                  "add to cart",
+                  "buy now"
+              ]
+
+              purchase_button_enabled = False
+
+              buttons = page.locator("button")
+
+              try:
+                  button_count = buttons.count()
+              except Exception:
+                  button_count = 0
+
+              for i in range(button_count):
+                  try:
+                      button = buttons.nth(i)
+
+                      if not button.is_visible():
+                          continue
+
+                      button_text = button.inner_text().strip().lower()
+
+                      if not button_text:
+                          continue
+
+                      for phrase in purchase_button_phrases:
+                          if phrase.lower() in button_text:
+                              if button.is_enabled():
+                                  purchase_button_enabled = True
+                                  break
+
+                      if purchase_button_enabled:
+                          break
+
+                  except Exception:
+                      pass
+
+              # جرير:
+              # إذا ظهرت علامة نفاد أو زر "أبلغني" نعتبره غير متوفر.
+              # وإلا لا نعتبره متوفرًا إلا إذا وجدنا زر شراء نشط.
+              available = (
+                  not out_of_stock
+                  and not notify_button_found
+                  and purchase_button_enabled
+              )
+
+              print("Jarir out_of_stock:", out_of_stock)
+              print("Jarir notify_button_found:", notify_button_found)
+              print("Jarir purchase_button_enabled:", purchase_button_enabled)
+              print("Jarir available:", available)
+
+              return available
+
+
+          with sync_playwright() as p:
+
+              browser = p.chromium.launch(
+                  headless=True
+              )
+
+              page = browser.new_page(
+                  viewport={"width": 1280, "height": 900},
+                  locale="ar-SA"
+              )
+
+              # =========================
+              # eXtra
+              # =========================
+
+              try:
+                  extra_available = check_extra(page)
+
+              except Exception as e:
+                  print("ERROR checking eXtra:", e)
+                  extra_available = False
+
+              extra_previous = get_previous_state(
+                  EXTRA_STATE_FILE
+              )
+
+              extra_current = (
+                  "available"
+                  if extra_available
+                  else "unavailable"
+              )
+
+              print()
+              print("===== eXtra =====")
+              print("Previous:", extra_previous)
+              print("Current:", extra_current)
+
+              if (
+                  extra_current == "available"
+                  and extra_previous == "unavailable"
+              ):
+                  send_telegram(
+                      "🚨 المنتج أصبح متوفرًا الآن!\n\n"
+                      "🏪 المتجر: eXtra\n"
+                      "📱 iPhone 18 Pro Max\n"
+                      "💾 512GB\n"
+                      "🎨 Burgundy\n\n"
+                      "🛒 افتح المنتج:\n"
+                      + EXTRA_URL
+                  )
+
+              if (
+                  extra_current == "available"
+                  and extra_previous == "unknown"
+              ):
+                  print(
+                      "eXtra first check: product is already available. "
+                      "No alert sent."
+                  )
+
+              save_state(
+                  EXTRA_STATE_FILE,
+                  extra_current
+              )
+
+
+              # =========================
+              # Jarir
+              # =========================
+
+              try:
+                  jarir_available = check_jarir(page)
+
+              except Exception as e:
+                  print("ERROR checking Jarir:", e)
+                  jarir_available = False
+
+              jarir_previous = get_previous_state(
+                  JARIR_STATE_FILE
+              )
+
+              jarir_current = (
+                  "available"
+                  if jarir_available
+                  else "unavailable"
+              )
+
+              print()
+              print("===== Jarir =====")
+              print("Previous:", jarir_previous)
+              print("Current:", jarir_current)
+
+              if (
+                  jarir_current == "available"
+                  and jarir_previous == "unavailable"
+              ):
+                  send_telegram(
+                      "🚨 المنتج أصبح متوفرًا الآن!\n\n"
+                      "🏪 المتجر: جرير\n"
+                      "📱 Apple iPhone 18 Pro Max\n"
+                      "💾 512GB\n\n"
+                      "🛒 افتح المنتج:\n"
+                      + JARIR_URL
+                  )
+
+              if (
+                  jarir_current == "available"
+                  and jarir_previous == "unknown"
+              ):
+                  print(
+                      "Jarir first check: product is already available. "
+                      "No alert sent."
+                  )
+
+              save_state(
+                  JARIR_STATE_FILE,
+                  jarir_current
+              )
+
 
               browser.close()
 
-          previous = "unknown"
-
-          if os.path.exists(STATE_FILE):
-              previous = open(STATE_FILE).read().strip()
-
-          current = "available" if available else "unavailable"
-
-          print("Previous:", previous)
-          print("Current:", current)
-
-          if current == "available" and previous == "unavailable":
-              send_telegram(
-                  "🚨 المنتج أصبح متوفرًا الآن!\n\n"
-                  "📱 iPhone 18 Pro Max\n"
-                  "💾 512GB\n"
-                  "🎨 Burgundy\n\n"
-                  "🛒 افتح المنتج:\n"
-                  + URL
-              )
-
-          if current == "available" and previous == "unknown":
-              print(
-                  "First check: product is already available. "
-                  "No alert sent."
-              )
-
-          open(STATE_FILE, "w").write(current)
           PY
 
           python check_stock.py
@@ -156,7 +395,7 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add stock_state.txt
+          git add extra_stock_state.txt jarir_stock_state.txt
 
           git diff --cached --quiet || git commit -m "Update stock status"
 
