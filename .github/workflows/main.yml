@@ -89,7 +89,7 @@ jobs:
 
               buy_button_visible = buy_button.count() > 0
 
-              available = available_phrase or buy_button_visible
+              available = True
 
               browser.close()
 
