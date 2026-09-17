@@ -1,0 +1,123 @@
+name: Extra Stock Monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  check-stock:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download project
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Check product
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          cat > check_stock.py <<'PY'
+          import os
+          import requests
+          from playwright.sync_api import sync_playwright
+
+          URL = "https://www.extra.com/en-sa/mobiles-tablets/mobiles/smartphone/apple-iphone-18-pro-max-5g-6-9-inch-512gb-burgundy/p/100528819"
+
+          TOKEN = os.environ["TELEGRAM_TOKEN"]
+          CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+
+          STATE_FILE = "stock_state.txt"
+
+          def send_telegram(message):
+              api = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+              requests.post(
+                  api,
+                  json={
+                      "chat_id": CHAT_ID,
+                      "text": message,
+                      "disable_web_page_preview": False
+                  },
+                  timeout=30
+              )
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+              page = browser.new_page(
+                  viewport={"width": 1280, "height": 900},
+                  locale="en-SA"
+              )
+
+              page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+              page.wait_for_timeout(10000)
+
+              text = page.locator("body").inner_text().lower()
+
+              available_phrase = (
+                  "product(s) are currently available for delivery"
+                  in text
+              )
+
+              buy_button = page.get_by_role(
+                  "button",
+                  name="add to cart"
+              )
+
+              buy_button_visible = buy_button.count() > 0
+
+              available = available_phrase or buy_button_visible
+
+              browser.close()
+
+          previous = "unknown"
+
+          if os.path.exists(STATE_FILE):
+              previous = open(STATE_FILE).read().strip()
+
+          current = "available" if available else "unavailable"
+
+          print("Previous:", previous)
+          print("Current:", current)
+
+          if current == "available" and previous == "unavailable":
+              send_telegram(
+                  "🚨 المنتج أصبح متوفرًا الآن!\n\n"
+                  "📱 iPhone 18 Pro Max\n"
+                  "💾 512GB\n"
+                  "🎨 Burgundy\n\n"
+                  "🛒 افتح المنتج:\n"
+                  + URL
+              )
+
+          if current == "available" and previous == "unknown":
+              print("First check: product is already available. No alert sent.")
+
+          open(STATE_FILE, "w").write(current)
+          PY
+
+          python check_stock.py
+
+      - name: Save status
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add stock_state.txt
+
+          git diff --cached --quiet || git commit -m "Update stock status"
+
+          git push
